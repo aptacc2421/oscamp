@@ -1,3 +1,8 @@
+# Toolchain is pinned in rust-toolchain.toml. If `cargo` reports `edition2024` / unsupported manifest
+# features after refreshing the lockfile, keep `indexmap` and `hashbrown` at or below the versions
+# declared in modules/axconfig/Cargo.toml build-dependencies (or run the same `cargo update -p ... --precise`
+# commands documented there).
+
 [workspace]
 resolver = "2"
 
