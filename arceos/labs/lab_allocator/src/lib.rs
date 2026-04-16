@@ -9,6 +9,12 @@
 
 #![no_std]
 
+#[cfg(feature = "heap-profile")]
+mod profile;
+
+#[cfg(feature = "heap-profile")]
+pub use profile::{snapshot as heap_profile_snapshot, LabHeapProfileSnapshot};
+
 use allocator::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -245,7 +251,9 @@ impl LabByteAllocator {
         let heap_low = self.heap_low;
         let heap_end = self.heap_end;
         let bins = &mut self.free_bins;
+        let mut co_iters = 0u64;
         loop {
+            co_iters += 1;
             let ob = base;
             let op = phy;
             Self::try_merge_prev(bins, heap_low, &mut base, &mut phy);
@@ -254,6 +262,10 @@ impl LabByteAllocator {
                 break;
             }
         }
+        #[cfg(feature = "heap-profile")]
+        profile::note_coalesce_iters(co_iters);
+        #[cfg(not(feature = "heap-profile"))]
+        let _ = co_iters;
 
         let node = base as *mut FreeNode;
         (*node).size = phy & !1;
@@ -269,6 +281,7 @@ impl LabByteAllocator {
         free: NonNull<FreeNode>,
         bi: usize,
         layout: Layout,
+        #[cfg_attr(not(feature = "heap-profile"), allow(unused_variables))] bin_block_tries: u32,
     ) -> AllocResult<NonNull<u8>> {
         let align = layout.align().max(core::mem::size_of::<usize>());
         let req = layout.size();
@@ -291,21 +304,23 @@ impl LabByteAllocator {
             return Err(AllocError::NoMemory);
         }
 
-        let rem = fend - (base + need_phy);
-        if rem > 0 && rem < MIN_BLOCK {
+        let rem_before_absorb = fend - (base + need_phy);
+        let absorb = rem_before_absorb > 0 && rem_before_absorb < MIN_BLOCK;
+        if absorb {
             need_phy = fend - base;
         }
 
         Self::unlink_bin(&mut self.free_bins, bi, free);
 
-        let rem = fend - (base + need_phy);
-        if rem >= MIN_BLOCK {
+        let rem_after = fend - (base + need_phy);
+        let split_tail = rem_after >= MIN_BLOCK;
+        if split_tail {
             let tail = base + need_phy;
             let tp = tail as *mut FreeNode;
-            (*tp).size = rem & !1;
+            (*tp).size = rem_after & !1;
             (*tp).next_bin = None;
-            write_footer(tail, rem, rem & !1);
-            self.insert_free_coalesced(tail, rem);
+            write_footer(tail, rem_after, rem_after & !1);
+            self.insert_free_coalesced(tail, rem_after);
         }
 
         let user_nn = NonNull::new_unchecked(user as *mut u8);
@@ -318,26 +333,45 @@ impl LabByteAllocator {
         write_footer(base, need_phy, need_phy | 1);
 
         self.used_bytes = self.used_bytes.saturating_add(req);
+        #[cfg(feature = "heap-profile")]
+        profile::note_alloc_ok(
+            req,
+            need_phy,
+            base,
+            user,
+            HDR_RESERVED,
+            split_tail,
+            absorb,
+            bin_block_tries,
+        );
         Ok(user_nn)
     }
 
     unsafe fn alloc_from_bins(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        #[cfg(feature = "heap-profile")]
+        profile::note_alloc_enter();
         let start_bin = bin_index_for_layout(&layout);
+        let mut block_tries = 0u32;
         for bi in start_bin..NUM_BINS {
             let mut cur = self.free_bins[bi];
             while let Some(free) = cur {
+                block_tries = block_tries.saturating_add(1);
                 let next = free.as_ref().next_bin;
-                match self.try_alloc_from_block(free, bi, layout) {
+                match self.try_alloc_from_block(free, bi, layout, block_tries) {
                     Ok(p) => return Ok(p),
                     Err(AllocError::NoMemory) => cur = next,
                     Err(e) => return Err(e),
                 }
             }
         }
+        #[cfg(feature = "heap-profile")]
+        profile::note_freelist_fail();
         Err(AllocError::NoMemory)
     }
 
     unsafe fn free_block(&mut self, user: NonNull<u8>, layout: Layout) {
+        #[cfg(feature = "heap-profile")]
+        profile::note_dealloc();
         let p = user.as_ptr() as usize;
         let back_off = *((p as *const usize).offset(-1));
         let base = p - back_off;

@@ -27,6 +27,8 @@ alloc-tlsf = ["axalloc/tlsf"]
 alloc-slab = ["axalloc/slab"]
 alloc-buddy = ["axalloc/buddy"]
 alloc-lab = ["axalloc/lab"]
+# Byte-heap + labAllocator counters; implies axalloc `heap-profile` (lab allocator only).
+heap-profile = ["axalloc/heap-profile"]
 paging = ["alloc", "axhal/paging", "axruntime/paging"]
 tls = ["alloc", "axhal/tls", "axruntime/tls", "axtask?/tls"]
 dma = ["alloc", "paging"]

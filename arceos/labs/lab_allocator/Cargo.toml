@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+heap-profile = []
 
 [dependencies]
 allocator = { git = "https://github.com/arceos-org/allocator.git", tag ="v0.1.0", features = ["bitmap"] }
