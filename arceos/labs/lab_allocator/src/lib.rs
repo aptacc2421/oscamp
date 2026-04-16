@@ -9,7 +9,8 @@
 //! With **`lab-scan-tlsf`**: map a conservative request size to `(FL, SL)`,
 //! scan toward larger bins; on the **first** `(FL,SL)` chain that has any fit,
 //! commit the **chain-local** best-fit (fewer `bin_block_tries`, may differ from
-//! global optimum).
+//! global optimum). If that path returns `NoMemory`, **fall back once** to the
+//! global best-fit scan (`bin_block_tries` accumulates across both passes).
 //! Used/free blocks carry a **footer** at `base + phy - 8`.
 
 #![no_std]
@@ -441,14 +442,16 @@ impl LabByteAllocator {
         best
     }
 
-    #[cfg(not(feature = "lab-scan-tlsf"))]
-    unsafe fn alloc_from_bins_global(&mut self, layout: &Layout) -> AllocResult<NonNull<u8>> {
+    unsafe fn alloc_from_bins_global(
+        &mut self,
+        layout: &Layout,
+        scanned: &mut u32,
+    ) -> AllocResult<NonNull<u8>> {
         let mut best: Option<(usize, usize, usize, AllocPlan, NonNull<FreeNode>, usize, usize)> = None;
-        let mut scanned = 0u32;
         for bi in 0..NUM_BINS {
             for sl in 0..NUM_SL {
                 if let Some((slack, fsize, base, plan, free)) =
-                    Self::scan_chain_best_fit(&self.free_bins, bi, sl, layout, &mut scanned)
+                    Self::scan_chain_best_fit(&self.free_bins, bi, sl, layout, scanned)
                 {
                     let better = match best {
                         None => true,
@@ -471,13 +474,17 @@ impl LabByteAllocator {
             return Err(AllocError::NoMemory);
         };
 
-        self.commit_alloc_from_block(free, bi, sl, layout, &plan, scanned)
+        self.commit_alloc_from_block(free, bi, sl, layout, &plan, *scanned)
     }
 
     /// TLSF-ordered scan: first non-empty chain (in size-increasing walk) with any fit;
     /// best-fit **only within that chain**.
     #[cfg(feature = "lab-scan-tlsf")]
-    unsafe fn alloc_from_bins_tlsf_walk(&mut self, layout: &Layout) -> AllocResult<NonNull<u8>> {
+    unsafe fn alloc_from_bins_tlsf_walk(
+        &mut self,
+        layout: &Layout,
+        scanned: &mut u32,
+    ) -> AllocResult<NonNull<u8>> {
         let map = layout
             .size()
             .saturating_add(HDR_RESERVED)
@@ -485,27 +492,24 @@ impl LabByteAllocator {
             .max(MIN_BLOCK);
         let fl0 = bin_index_for_phy(map);
         let sl0 = sub_index_for_phy(fl0, map);
-        let mut scanned = 0u32;
 
         for sl in sl0..NUM_SL {
             if let Some((_s, _f, _b, plan, free)) =
-                Self::scan_chain_best_fit(&self.free_bins, fl0, sl, layout, &mut scanned)
+                Self::scan_chain_best_fit(&self.free_bins, fl0, sl, layout, scanned)
             {
-                return self.commit_alloc_from_block(free, fl0, sl, layout, &plan, scanned);
+                return self.commit_alloc_from_block(free, fl0, sl, layout, &plan, *scanned);
             }
         }
         for bi in (fl0 + 1)..NUM_BINS {
             for sl in 0..NUM_SL {
                 if let Some((_s, _f, _b, plan, free)) =
-                    Self::scan_chain_best_fit(&self.free_bins, bi, sl, layout, &mut scanned)
+                    Self::scan_chain_best_fit(&self.free_bins, bi, sl, layout, scanned)
                 {
-                    return self.commit_alloc_from_block(free, bi, sl, layout, &plan, scanned);
+                    return self.commit_alloc_from_block(free, bi, sl, layout, &plan, *scanned);
                 }
             }
         }
 
-        #[cfg(feature = "heap-profile")]
-        profile::note_freelist_fail();
         Err(AllocError::NoMemory)
     }
 
@@ -513,14 +517,14 @@ impl LabByteAllocator {
         #[cfg(feature = "heap-profile")]
         profile::note_alloc_enter();
 
+        let mut scanned = 0u32;
         #[cfg(feature = "lab-scan-tlsf")]
         {
-            return self.alloc_from_bins_tlsf_walk(&layout);
+            if let Ok(ptr) = self.alloc_from_bins_tlsf_walk(&layout, &mut scanned) {
+                return Ok(ptr);
+            }
         }
-        #[cfg(not(feature = "lab-scan-tlsf"))]
-        {
-            return self.alloc_from_bins_global(&layout);
-        }
+        self.alloc_from_bins_global(&layout, &mut scanned)
     }
 
     unsafe fn free_block(&mut self, user: NonNull<u8>, layout: Layout) {

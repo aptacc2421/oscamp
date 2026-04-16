@@ -7,7 +7,7 @@ edition = "2021"
 default = []
 heap-profile = []
 # TLSF-style (FL,SL) start + scan larger bins; **first** chain with any fit wins,
-# best-fit **within that chain only** (fewer probes than global best-fit).
+# best-fit **within that chain only**; on NoMemory runs **one** global best-fit fallback.
 lab-scan-tlsf = []
 
 [dependencies]
