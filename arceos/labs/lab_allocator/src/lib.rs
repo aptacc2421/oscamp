@@ -1,13 +1,11 @@
 //! Lab byte allocator: **segregated free lists** (by `floor_log2` of block size) +
-//! **footers** for O(1) physical coalesce on free. No `rlsf`.
+//! **second-level sub-bins** (8 per first-level bin, TLSF-style) + **footers** for O(1)
+//! physical coalesce. No `rlsf`.
 //!
-//! Route B step 2: allocation scans bins from `bin(need_est)` upward; each bin is
-//! an intrusive singly linked list **sorted by block address within each bin**.
+//! Within each `(FL, SL)` chain, free blocks are **sorted by base address**.
 //! **Best-fit**: among all blocks that can satisfy `layout`, pick the one with
 //! smallest slack `fsize - need_phy` (then smaller `fsize`, then lower `base`).
-//! Used/free blocks carry a
-//! **footer** at `base + phy - 8` so backward merge does not need a global
-//! address-sorted chain.
+//! Used/free blocks carry a **footer** at `base + phy - 8`.
 
 #![no_std]
 
@@ -24,8 +22,13 @@ use core::ptr::NonNull;
 const MIN_BLOCK: usize = 32;
 const HDR_RESERVED: usize = core::mem::size_of::<usize>() * 2;
 /// `floor_log2(size)` for `size >= MIN_BLOCK` maps to bin `lg - BIN_SHIFT`.
-const BIN_SHIFT: usize = 5; // bins start at sizes >= 32 (MIN_BLOCK)
-const NUM_BINS: usize = 40; // up to ~16 TiB class
+const BIN_SHIFT: usize = 5;
+const NUM_BINS: usize = 40;
+/// Second-level split count per first-level bin (TLSF-like).
+const NUM_SL: usize = 8;
+
+type SlRow = [Option<NonNull<FreeNode>>; NUM_SL];
+type BinMatrix = [SlRow; NUM_BINS];
 
 /// Result of sizing an allocation into a given free block (no mutation).
 #[derive(Clone, Copy)]
@@ -67,7 +70,6 @@ fn is_free_hdr(w: usize) -> bool {
     w & 1 == 0
 }
 
-/// `floor_log2` for `sz >= 1`.
 #[inline]
 fn floor_log2(sz: usize) -> usize {
     (usize::BITS as usize) - sz.leading_zeros() as usize - 1
@@ -80,16 +82,29 @@ fn bin_index_for_phy(sz: usize) -> usize {
     lg.saturating_sub(BIN_SHIFT).min(NUM_BINS - 1)
 }
 
-/// Conservative bin index from `layout` (not used when scanning from bin 0 for best-fit).
+/// Inclusive `lo` / exclusive `hi` for sizes mapped to first-level bin `bi`.
 #[inline]
-#[allow(dead_code)]
-fn bin_index_for_layout(layout: &Layout) -> usize {
-    let est = layout
-        .size()
-        .saturating_add(HDR_RESERVED)
-        .saturating_add(layout.align())
-        .max(MIN_BLOCK);
-    bin_index_for_phy(est)
+fn fl_bounds(bi: usize) -> (usize, usize) {
+    let k = bi.saturating_add(BIN_SHIFT);
+    if k >= usize::BITS as usize {
+        return (usize::MAX / 4, usize::MAX / 2);
+    }
+    let lo = (1usize << k).max(MIN_BLOCK);
+    let hi = lo.checked_shl(1).unwrap_or(usize::MAX);
+    (lo, hi)
+}
+
+/// Second-level index for physical size `phy` in first-level bin `bi`.
+#[inline]
+fn sub_index_for_phy(bi: usize, phy: usize) -> usize {
+    let (lo, hi) = fl_bounds(bi);
+    let span = hi.saturating_sub(lo);
+    if span == 0 {
+        return 0;
+    }
+    let phy = phy.clamp(lo, hi.saturating_sub(1));
+    let x = phy.saturating_sub(lo).saturating_mul(NUM_SL) / span;
+    x.min(NUM_SL - 1)
 }
 
 #[inline]
@@ -100,11 +115,9 @@ unsafe fn write_footer(base: usize, phy: usize, word: usize) {
 pub struct LabByteAllocator {
     regions: [(usize, usize); 32],
     region_count: usize,
-    /// Lowest byte in any registered region (guards `base-8` on backward merge).
     heap_low: usize,
-    /// Highest byte exclusive (for validating `next` physical merge).
     heap_end: usize,
-    free_bins: [Option<NonNull<FreeNode>>; NUM_BINS],
+    free_bins: BinMatrix,
     total_bytes: usize,
     used_bytes: usize,
 }
@@ -113,7 +126,6 @@ unsafe impl Send for LabByteAllocator {}
 unsafe impl Sync for LabByteAllocator {}
 
 impl LabByteAllocator {
-    /// Dry-run: compute `need_phy` / tail split for `layout` in `[base, base+fsize)`.
     fn compute_alloc_plan(base: usize, fsize: usize, layout: &Layout) -> Result<AllocPlan, AllocError> {
         let align = layout.align().max(core::mem::size_of::<usize>());
         let req = layout.size();
@@ -160,7 +172,7 @@ impl LabByteAllocator {
             region_count: 0,
             heap_low: usize::MAX,
             heap_end: 0,
-            free_bins: [None; NUM_BINS],
+            free_bins: [[None; NUM_SL]; NUM_BINS],
             total_bytes: 0,
             used_bytes: 0,
         }
@@ -187,19 +199,15 @@ impl LabByteAllocator {
         Ok(())
     }
 
-    /// Remove `node` from `free_bins[bi]` singly linked list.
-    unsafe fn unlink_bin(
-        bins: &mut [Option<NonNull<FreeNode>>; NUM_BINS],
-        bi: usize,
-        node: NonNull<FreeNode>,
-    ) {
+    /// Remove `node` from `free_bins[bi][sl]`.
+    unsafe fn unlink_bin(bins: &mut BinMatrix, bi: usize, sl: usize, node: NonNull<FreeNode>) {
         let want = node_addr(node);
-        let Some(mut head) = bins[bi] else {
-            debug_assert!(false, "unlink_bin: empty bin");
+        let Some(mut head) = bins[bi][sl] else {
+            debug_assert!(false, "unlink_bin: empty (bi, sl)");
             return;
         };
         if node_addr(head) == want {
-            bins[bi] = head.as_ref().next_bin;
+            bins[bi][sl] = head.as_ref().next_bin;
             head.as_mut().next_bin = None;
             return;
         }
@@ -212,18 +220,15 @@ impl LabByteAllocator {
             }
             prev = nxt;
         }
-        debug_assert!(false, "unlink_bin: node not in bin");
+        debug_assert!(false, "unlink_bin: node not in (bi, sl)");
     }
 
-    /// Insert `node` into `free_bins[bi]` in **increasing address** order.
-    unsafe fn link_bin_addr_sorted(
-        bins: &mut [Option<NonNull<FreeNode>>; NUM_BINS],
-        bi: usize,
-        mut node: NonNull<FreeNode>,
-    ) {
+    /// Insert `node` into `free_bins[bi][sl]` sorted by increasing base address.
+    unsafe fn link_bin_addr_sorted(bins: &mut BinMatrix, bi: usize, sl: usize, mut node: NonNull<FreeNode>) {
         let na = node_addr(node);
-        let mut cur = bins[bi];
-        let mut prev_slot: *mut Option<NonNull<FreeNode>> = &mut bins[bi];
+        let head_slot = &mut bins[bi][sl];
+        let mut cur = *head_slot;
+        let mut prev_slot: *mut Option<NonNull<FreeNode>> = head_slot;
         while let Some(c) = cur {
             if node_addr(c) >= na {
                 break;
@@ -235,26 +240,35 @@ impl LabByteAllocator {
         *prev_slot = Some(node);
     }
 
-    /// Walk bin `bi` to unlink block at `base` (used after coalesce changed address).
-    unsafe fn unlink_bin_by_addr(
-        bins: &mut [Option<NonNull<FreeNode>>; NUM_BINS],
-        bi: usize,
-        base: usize,
-    ) -> Option<NonNull<FreeNode>> {
-        let mut cur = bins[bi];
+    /// Unlink free block at `base` whose free header size is `phy` (determines `sl`).
+    unsafe fn unlink_bin_by_addr(bins: &mut BinMatrix, bi: usize, phy: usize, base: usize) -> Option<NonNull<FreeNode>> {
+        let sl = sub_index_for_phy(bi, phy);
+        let mut cur = bins[bi][sl];
         while let Some(n) = cur {
             if node_addr(n) == base {
-                Self::unlink_bin(bins, bi, n);
+                Self::unlink_bin(bins, bi, sl, n);
                 return Some(n);
             }
             cur = n.as_ref().next_bin;
         }
+        for osl in 0..NUM_SL {
+            if osl == sl {
+                continue;
+            }
+            let mut cur = bins[bi][osl];
+            while let Some(n) = cur {
+                if node_addr(n) == base {
+                    Self::unlink_bin(bins, bi, osl, n);
+                    return Some(n);
+                }
+                cur = n.as_ref().next_bin;
+            }
+        }
         None
     }
 
-    /// Try merge with previous physical block using footer at `base-8`.
     unsafe fn try_merge_prev(
-        bins: &mut [Option<NonNull<FreeNode>>; NUM_BINS],
+        bins: &mut BinMatrix,
         heap_low: usize,
         base: &mut usize,
         phy: &mut usize,
@@ -272,17 +286,16 @@ impl LabByteAllocator {
             return;
         }
         let bi = bin_index_for_phy(psz);
-        if Self::unlink_bin_by_addr(bins, bi, pstart).is_none() {
+        if Self::unlink_bin_by_addr(bins, bi, psz, pstart).is_none() {
             return;
         }
         *phy += psz;
         *base = pstart;
     }
 
-    /// Try merge with next physical block at `base + phy`.
     unsafe fn try_merge_next(
         heap_end: usize,
-        bins: &mut [Option<NonNull<FreeNode>>; NUM_BINS],
+        bins: &mut BinMatrix,
         base: usize,
         phy: &mut usize,
     ) {
@@ -296,13 +309,12 @@ impl LabByteAllocator {
         }
         let nsz = phys(nw);
         let bi = bin_index_for_phy(nsz);
-        if Self::unlink_bin_by_addr(bins, bi, nstart).is_none() {
+        if Self::unlink_bin_by_addr(bins, bi, nsz, nstart).is_none() {
             return;
         }
         *phy += nsz;
     }
 
-    /// Free `phy` bytes at `base`, coalesce, write header+footer, insert into bin.
     unsafe fn insert_free_coalesced(&mut self, mut base: usize, mut phy: usize) {
         let heap_low = self.heap_low;
         let heap_end = self.heap_end;
@@ -329,13 +341,15 @@ impl LabByteAllocator {
         write_footer(base, phy, phy & !1);
 
         let bi = bin_index_for_phy(phy);
-        Self::link_bin_addr_sorted(&mut self.free_bins, bi, NonNull::new_unchecked(node));
+        let sl = sub_index_for_phy(bi, phy);
+        Self::link_bin_addr_sorted(&mut self.free_bins, bi, sl, NonNull::new_unchecked(node));
     }
 
     unsafe fn commit_alloc_from_block(
         &mut self,
         free: NonNull<FreeNode>,
         bi: usize,
+        sl: usize,
         layout: &Layout,
         plan: &AllocPlan,
         #[cfg_attr(not(feature = "heap-profile"), allow(unused_variables))] bin_block_tries: u32,
@@ -351,7 +365,7 @@ impl LabByteAllocator {
             ..
         } = *plan;
 
-        Self::unlink_bin(&mut self.free_bins, bi, free);
+        Self::unlink_bin(&mut self.free_bins, bi, sl, free);
 
         if split_tail {
             let tail = base + need_phy;
@@ -391,44 +405,45 @@ impl LabByteAllocator {
     unsafe fn alloc_from_bins(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         #[cfg(feature = "heap-profile")]
         profile::note_alloc_enter();
-        // Best-fit must consider every bin: `bin_index_for_layout` can over-estimate and
-        // skip a smaller bin that still has a block large enough for this `layout`.
-        let start_bin = 0usize;
-        let mut best: Option<(usize, usize, usize, AllocPlan, NonNull<FreeNode>, usize)> = None;
-        // (slack, fsize, base, plan, free, bi) — lexicographic minimize
+
+        let mut best: Option<(usize, usize, usize, AllocPlan, NonNull<FreeNode>, usize, usize)> = None;
+        // (slack, fsize, base, plan, free, bi, sl)
+
         let mut scanned = 0u32;
-        for bi in start_bin..NUM_BINS {
-            let mut cur = self.free_bins[bi];
-            while let Some(free) = cur {
-                scanned = scanned.saturating_add(1);
-                let next = free.as_ref().next_bin;
-                let base = node_addr(free);
-                let fsize = phys(free.as_ref().size);
-                if let Ok(plan) = Self::compute_alloc_plan(base, fsize, &layout) {
-                    let slack = plan.slack;
-                    let better = match best {
-                        None => true,
-                        Some((bs, bf, bb, _, _, _)) => {
-                            slack < bs
-                                || (slack == bs && fsize < bf)
-                                || (slack == bs && fsize == bf && base < bb)
+        for bi in 0..NUM_BINS {
+            for sl in 0..NUM_SL {
+                let mut cur = self.free_bins[bi][sl];
+                while let Some(free) = cur {
+                    scanned = scanned.saturating_add(1);
+                    let next = free.as_ref().next_bin;
+                    let base = node_addr(free);
+                    let fsize = phys(free.as_ref().size);
+                    if let Ok(plan) = Self::compute_alloc_plan(base, fsize, &layout) {
+                        let slack = plan.slack;
+                        let better = match best {
+                            None => true,
+                            Some((bs, bf, bb, _, _, _, _)) => {
+                                slack < bs
+                                    || (slack == bs && fsize < bf)
+                                    || (slack == bs && fsize == bf && base < bb)
+                            }
+                        };
+                        if better {
+                            best = Some((slack, fsize, base, plan, free, bi, sl));
                         }
-                    };
-                    if better {
-                        best = Some((slack, fsize, base, plan, free, bi));
                     }
+                    cur = next;
                 }
-                cur = next;
             }
         }
 
-        let Some((_slack, _fsize, _base, plan, free, bi)) = best else {
+        let Some((_slack, _fsize, _base, plan, free, bi, sl)) = best else {
             #[cfg(feature = "heap-profile")]
             profile::note_freelist_fail();
             return Err(AllocError::NoMemory);
         };
 
-        self.commit_alloc_from_block(free, bi, &layout, &plan, scanned)
+        self.commit_alloc_from_block(free, bi, sl, &layout, &plan, scanned)
     }
 
     unsafe fn free_block(&mut self, user: NonNull<u8>, layout: Layout) {
@@ -466,7 +481,8 @@ impl BaseAllocator for LabByteAllocator {
             (*n).next_bin = None;
             write_footer(start, size, size & !1);
             let bi = bin_index_for_phy(size);
-            Self::link_bin_addr_sorted(&mut self.free_bins, bi, NonNull::new_unchecked(n));
+            let sl = sub_index_for_phy(bi, size);
+            Self::link_bin_addr_sorted(&mut self.free_bins, bi, sl, NonNull::new_unchecked(n));
         }
     }
 
