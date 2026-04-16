@@ -3,6 +3,8 @@
 //!
 //! Route B step 2: allocation scans bins from `bin(need_est)` upward; each bin is
 //! an intrusive singly linked list **sorted by block address within each bin**.
+//! **Best-fit**: among all blocks that can satisfy `layout`, pick the one with
+//! smallest slack `fsize - need_phy` (then smaller `fsize`, then lower `base`).
 //! Used/free blocks carry a
 //! **footer** at `base + phy - 8` so backward merge does not need a global
 //! address-sorted chain.
@@ -24,6 +26,18 @@ const HDR_RESERVED: usize = core::mem::size_of::<usize>() * 2;
 /// `floor_log2(size)` for `size >= MIN_BLOCK` maps to bin `lg - BIN_SHIFT`.
 const BIN_SHIFT: usize = 5; // bins start at sizes >= 32 (MIN_BLOCK)
 const NUM_BINS: usize = 40; // up to ~16 TiB class
+
+/// Result of sizing an allocation into a given free block (no mutation).
+#[derive(Clone, Copy)]
+struct AllocPlan {
+    user: usize,
+    need_phy: usize,
+    absorb: bool,
+    split_tail: bool,
+    rem_after: usize,
+    /// `fsize - need_phy` after absorb/sizing; minimize for best-fit.
+    slack: usize,
+}
 
 #[repr(C)]
 struct FreeNode {
@@ -66,8 +80,9 @@ fn bin_index_for_phy(sz: usize) -> usize {
     lg.saturating_sub(BIN_SHIFT).min(NUM_BINS - 1)
 }
 
-/// Conservative first bin to search for `layout`.
+/// Conservative bin index from `layout` (not used when scanning from bin 0 for best-fit).
 #[inline]
+#[allow(dead_code)]
 fn bin_index_for_layout(layout: &Layout) -> usize {
     let est = layout
         .size()
@@ -98,6 +113,47 @@ unsafe impl Send for LabByteAllocator {}
 unsafe impl Sync for LabByteAllocator {}
 
 impl LabByteAllocator {
+    /// Dry-run: compute `need_phy` / tail split for `layout` in `[base, base+fsize)`.
+    fn compute_alloc_plan(base: usize, fsize: usize, layout: &Layout) -> Result<AllocPlan, AllocError> {
+        let align = layout.align().max(core::mem::size_of::<usize>());
+        let req = layout.size();
+        let fend = base + fsize;
+
+        let user = align_up(base.saturating_add(HDR_RESERVED), align);
+        if user < base + HDR_RESERVED {
+            return Err(AllocError::NoMemory);
+        }
+
+        let mut need_phy = user
+            .checked_sub(base)
+            .and_then(|h| h.checked_add(req))
+            .ok_or(AllocError::NoMemory)?;
+        need_phy = align_up(need_phy, core::mem::size_of::<usize>()).max(MIN_BLOCK);
+
+        if base + need_phy > fend {
+            return Err(AllocError::NoMemory);
+        }
+
+        let rem_before_absorb = fend - (base + need_phy);
+        let absorb = rem_before_absorb > 0 && rem_before_absorb < MIN_BLOCK;
+        if absorb {
+            need_phy = fend - base;
+        }
+
+        let rem_after = fend - (base + need_phy);
+        let split_tail = rem_after >= MIN_BLOCK;
+        let slack = fsize.saturating_sub(need_phy);
+
+        Ok(AllocPlan {
+            user,
+            need_phy,
+            absorb,
+            split_tail,
+            rem_after,
+            slack,
+        })
+    }
+
     pub const fn new() -> Self {
         Self {
             regions: [(0, 0); 32],
@@ -276,44 +332,28 @@ impl LabByteAllocator {
         Self::link_bin_addr_sorted(&mut self.free_bins, bi, NonNull::new_unchecked(node));
     }
 
-    unsafe fn try_alloc_from_block(
+    unsafe fn commit_alloc_from_block(
         &mut self,
         free: NonNull<FreeNode>,
         bi: usize,
-        layout: Layout,
+        layout: &Layout,
+        plan: &AllocPlan,
         #[cfg_attr(not(feature = "heap-profile"), allow(unused_variables))] bin_block_tries: u32,
     ) -> AllocResult<NonNull<u8>> {
-        let align = layout.align().max(core::mem::size_of::<usize>());
         let req = layout.size();
         let base = node_addr(free);
-        let fsize = phys(free.as_ref().size);
-        let fend = base + fsize;
 
-        let user = align_up(base + HDR_RESERVED, align);
-        if user < base + HDR_RESERVED {
-            return Err(AllocError::NoMemory);
-        }
-
-        let mut need_phy = user
-            .checked_sub(base)
-            .and_then(|h| h.checked_add(req))
-            .ok_or(AllocError::NoMemory)?;
-        need_phy = align_up(need_phy, core::mem::size_of::<usize>()).max(MIN_BLOCK);
-
-        if base + need_phy > fend {
-            return Err(AllocError::NoMemory);
-        }
-
-        let rem_before_absorb = fend - (base + need_phy);
-        let absorb = rem_before_absorb > 0 && rem_before_absorb < MIN_BLOCK;
-        if absorb {
-            need_phy = fend - base;
-        }
+        let AllocPlan {
+            user,
+            need_phy,
+            absorb,
+            split_tail,
+            rem_after,
+            ..
+        } = *plan;
 
         Self::unlink_bin(&mut self.free_bins, bi, free);
 
-        let rem_after = fend - (base + need_phy);
-        let split_tail = rem_after >= MIN_BLOCK;
         if split_tail {
             let tail = base + need_phy;
             let tp = tail as *mut FreeNode;
@@ -350,23 +390,44 @@ impl LabByteAllocator {
     unsafe fn alloc_from_bins(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         #[cfg(feature = "heap-profile")]
         profile::note_alloc_enter();
-        let start_bin = bin_index_for_layout(&layout);
-        let mut block_tries = 0u32;
+        // Best-fit must consider every bin: `bin_index_for_layout` can over-estimate and
+        // skip a smaller bin that still has a block large enough for this `layout`.
+        let start_bin = 0usize;
+        let mut best: Option<(usize, usize, usize, AllocPlan, NonNull<FreeNode>, usize)> = None;
+        // (slack, fsize, base, plan, free, bi) — lexicographic minimize
+        let mut scanned = 0u32;
         for bi in start_bin..NUM_BINS {
             let mut cur = self.free_bins[bi];
             while let Some(free) = cur {
-                block_tries = block_tries.saturating_add(1);
+                scanned = scanned.saturating_add(1);
                 let next = free.as_ref().next_bin;
-                match self.try_alloc_from_block(free, bi, layout, block_tries) {
-                    Ok(p) => return Ok(p),
-                    Err(AllocError::NoMemory) => cur = next,
-                    Err(e) => return Err(e),
+                let base = node_addr(free);
+                let fsize = phys(free.as_ref().size);
+                if let Ok(plan) = Self::compute_alloc_plan(base, fsize, &layout) {
+                    let slack = plan.slack;
+                    let better = match best {
+                        None => true,
+                        Some((bs, bf, bb, _, _, _)) => {
+                            slack < bs
+                                || (slack == bs && fsize < bf)
+                                || (slack == bs && fsize == bf && base < bb)
+                        }
+                    };
+                    if better {
+                        best = Some((slack, fsize, base, plan, free, bi));
+                    }
                 }
+                cur = next;
             }
         }
-        #[cfg(feature = "heap-profile")]
-        profile::note_freelist_fail();
-        Err(AllocError::NoMemory)
+
+        let Some((_slack, _fsize, _base, plan, free, bi)) = best else {
+            #[cfg(feature = "heap-profile")]
+            profile::note_freelist_fail();
+            return Err(AllocError::NoMemory);
+        };
+
+        self.commit_alloc_from_block(free, bi, &layout, &plan, scanned)
     }
 
     unsafe fn free_block(&mut self, user: NonNull<u8>, layout: Layout) {
