@@ -523,7 +523,16 @@ impl LabByteAllocator {
             if let Ok(ptr) = self.alloc_from_bins_tlsf_walk(&layout, &mut scanned) {
                 return Ok(ptr);
             }
+            #[cfg(feature = "heap-profile")]
+            let scanned_after_tlsf = scanned;
+            let res = self.alloc_from_bins_global(&layout, &mut scanned);
+            #[cfg(feature = "heap-profile")]
+            if res.is_ok() {
+                profile::note_tlsf_fallback_global_ok(scanned.saturating_sub(scanned_after_tlsf));
+            }
+            return res;
         }
+        #[cfg(not(feature = "lab-scan-tlsf"))]
         self.alloc_from_bins_global(&layout, &mut scanned)
     }
 

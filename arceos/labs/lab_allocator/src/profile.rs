@@ -14,6 +14,11 @@ static ABSORB_WHOLE_TAIL: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static COALESCE_LOOP_ITERS: AtomicU64 = AtomicU64::new(0);
 static BIN_BLOCK_TRIES: AtomicU64 = AtomicU64::new(0);
+/// `lab-scan-tlsf` returned `NoMemory` then **global** best-fit succeeded (per alloc).
+static TLSF_FALLBACK_GLOBAL_OK: AtomicU64 = AtomicU64::new(0);
+/// Sum of `bin_block_tries` **during the global pass only** for those fallbacks
+/// (excludes tries already counted for the TLSF walk on the same `alloc`).
+static TLSF_FALLBACK_BIN_BLOCK_TRIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LabHeapProfileSnapshot {
@@ -28,6 +33,10 @@ pub struct LabHeapProfileSnapshot {
     pub dealloc_calls: u64,
     pub coalesce_loop_iters: u64,
     pub bin_block_tries: u64,
+    /// Count of successful allocs where TLSF walk failed first and global scan found a block.
+    pub tlsf_fallback_global_ok: u64,
+    /// Total extra `bin_block_tries` on the global pass in those cases (`avg` = this / `tlsf_fallback_global_ok`).
+    pub tlsf_fallback_bin_block_tries: u64,
 }
 
 impl LabHeapProfileSnapshot {
@@ -61,6 +70,8 @@ pub fn snapshot() -> LabHeapProfileSnapshot {
         dealloc_calls: DEALLOC_CALLS.load(Ordering::Relaxed),
         coalesce_loop_iters: COALESCE_LOOP_ITERS.load(Ordering::Relaxed),
         bin_block_tries: BIN_BLOCK_TRIES.load(Ordering::Relaxed),
+        tlsf_fallback_global_ok: TLSF_FALLBACK_GLOBAL_OK.load(Ordering::Relaxed),
+        tlsf_fallback_bin_block_tries: TLSF_FALLBACK_BIN_BLOCK_TRIES.load(Ordering::Relaxed),
     }
 }
 
@@ -107,4 +118,12 @@ pub(crate) fn note_dealloc() {
 #[inline]
 pub(crate) fn note_coalesce_iters(iters: u64) {
     COALESCE_LOOP_ITERS.fetch_add(iters, Ordering::Relaxed);
+}
+
+/// `global_pass_tries` = `scanned` after global minus `scanned` after TLSF (same alloc).
+#[cfg(feature = "lab-scan-tlsf")]
+#[inline]
+pub(crate) fn note_tlsf_fallback_global_ok(global_pass_tries: u32) {
+    TLSF_FALLBACK_GLOBAL_OK.fetch_add(1, Ordering::Relaxed);
+    TLSF_FALLBACK_BIN_BLOCK_TRIES.fetch_add(global_pass_tries as u64, Ordering::Relaxed);
 }
