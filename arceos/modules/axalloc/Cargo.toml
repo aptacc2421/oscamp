@@ -17,6 +17,7 @@ buddy = ["allocator/buddy"]
 lab = ["lab_allocator"]
 # Lab byte allocator page-internal counters + expand-path logging (requires `lab`).
 heap-profile = ["lab", "lab_allocator/heap-profile"]
+lab-scan-tlsf = ["lab", "lab_allocator/lab-scan-tlsf"]
 
 [dependencies]
 log = "0.4.21"

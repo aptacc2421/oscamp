@@ -22,6 +22,7 @@
 //!     - `alloc-buddy`: Use the buddy system allocator.
 //!     - `alloc-lab`: Use the course lab byte allocator.
 //!     - `heap-profile`: Heap expand path + lab allocator page-internal profiling (`FEATURES=heap-profile` in make).
+//!     - `lab-scan-tlsf`: Lab allocator TLSF-style scan order (`FEATURES=lab-scan-tlsf`).
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
 //! - Task management

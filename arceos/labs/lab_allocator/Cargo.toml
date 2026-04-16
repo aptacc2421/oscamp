@@ -6,6 +6,9 @@ edition = "2021"
 [features]
 default = []
 heap-profile = []
+# TLSF-style (FL,SL) start + scan larger bins; **first** chain with any fit wins,
+# best-fit **within that chain only** (fewer probes than global best-fit).
+lab-scan-tlsf = []
 
 [dependencies]
 allocator = { git = "https://github.com/arceos-org/allocator.git", tag ="v0.1.0", features = ["bitmap"] }
