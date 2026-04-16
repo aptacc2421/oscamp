@@ -25,7 +25,12 @@ use allocator::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-const MIN_BLOCK: usize = 32;
+/// Minimum physical block size for both used and free blocks.
+///
+/// A free block needs `FreeNode` (`2 * usize`) plus a footer `usize` at
+/// `base + phy - sizeof(usize)` without overlapping the second list word, so
+/// `phy >= 3 * sizeof(usize)` (e.g. **24** on 64-bit). Values below that are unsafe.
+const MIN_BLOCK: usize = 3 * core::mem::size_of::<usize>();
 const HDR_RESERVED: usize = core::mem::size_of::<usize>() * 2;
 /// `floor_log2(size)` for `size >= MIN_BLOCK` maps to bin `lg - BIN_SHIFT`.
 const BIN_SHIFT: usize = 5;
