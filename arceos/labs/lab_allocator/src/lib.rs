@@ -346,7 +346,6 @@ impl LabByteAllocator {
         let AllocPlan {
             user,
             need_phy,
-            absorb,
             split_tail,
             rem_after,
             ..
@@ -381,9 +380,11 @@ impl LabByteAllocator {
             user,
             HDR_RESERVED,
             split_tail,
-            absorb,
+            plan.absorb,
             bin_block_tries,
         );
+        #[cfg(not(feature = "heap-profile"))]
+        let _ = plan.absorb;
         Ok(user_nn)
     }
 
