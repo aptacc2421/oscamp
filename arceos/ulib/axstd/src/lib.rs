@@ -57,8 +57,23 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
+mod ax_hasher;
+
+#[cfg(feature = "alloc")]
 #[doc(no_inline)]
-pub use alloc::{boxed, collections, format, string, vec};
+pub use alloc::{boxed, format, string, vec};
+
+/// Same surface as `std::collections`: types from `alloc`, plus `HashMap` / `HashSet` from hashbrown.
+///
+/// Default hasher is `AxRandomState`, seeded via `arceos_api::random::ax_random_u128`.
+#[cfg(feature = "alloc")]
+pub mod collections {
+    pub use alloc::collections::*;
+    pub use crate::ax_hasher::AxRandomState;
+
+    pub type HashMap<K, V, S = AxRandomState> = hashbrown::HashMap<K, V, S>;
+    pub type HashSet<T, S = AxRandomState> = hashbrown::HashSet<T, S>;
+}
 
 #[doc(no_inline)]
 pub use core::{arch, cell, cmp, hint, marker, mem, ops, ptr, slice, str};

@@ -1,4 +1,5 @@
 mod mem;
+mod random;
 mod task;
 
 cfg_fs! {
@@ -40,6 +41,7 @@ mod time {
 }
 
 pub use self::mem::*;
+pub use self::random::*;
 pub use self::stdio::*;
 pub use self::task::*;
 pub use self::time::*;

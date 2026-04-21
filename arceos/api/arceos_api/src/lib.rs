@@ -35,6 +35,16 @@ pub mod sys {
     }
 }
 
+/// Pseudo-random values from the platform (not suitable for cryptography).
+///
+/// Typical uses include seeding hash maps to reduce collision-based denial of service.
+pub mod random {
+    define_api! {
+        /// Returns a 128-bit value from the kernel PRNG.
+        pub fn ax_random_u128() -> u128;
+    }
+}
+
 /// Time-related operations.
 pub mod time {
     define_api_type! {

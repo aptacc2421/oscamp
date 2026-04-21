@@ -83,3 +83,6 @@ arceos_api = { workspace = true }
 axio = "0.1"
 axerrno = "0.1"
 kspin = "0.1"
+# `alloc::collections` has no `HashMap` on this toolchain; hashbrown matches `std::HashMap` usage.
+hashbrown = { version = "=0.15.5", default-features = true }
+foldhash = { version = "=0.1.5", default-features = false }
