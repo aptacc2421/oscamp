@@ -43,10 +43,13 @@ jobs:
         run: |
           mkdir -p "$HOME/.cargo/bin"
           SYSROOT=$(rustc --print sysroot)
-          LLVM_BIN="$SYSROOT/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+          HOST=$(rustc -vV | sed -n 's/^host: //p')
+          LLVM_BIN="$SYSROOT/lib/rustlib/$HOST/bin"
           cp "$LLVM_BIN/llvm-objcopy" "$HOME/.cargo/bin/rust-objcopy"
           cp "$LLVM_BIN/llvm-objdump" "$HOME/.cargo/bin/rust-objdump"
-          rust-objcopy --version
+          # llvm-objcopy is dynamically linked against libLLVM in the sysroot; ~/.cargo/bin is not in its rpath.
+          echo "LD_LIBRARY_PATH=${SYSROOT}/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="${SYSROOT}/lib:${LD_LIBRARY_PATH:-}" rust-objcopy --version
       - name: Check rust version
         run: rustc --version --verbose
       - uses: ./.github/workflows/actions/setup-musl
