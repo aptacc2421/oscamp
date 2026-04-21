@@ -10,10 +10,14 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axalloc"
 documentation = "https://arceos-org.github.io/arceos/axalloc/index.html"
 
 [features]
-default = ["tlsf"]
+default = ["lab"]
 tlsf = ["allocator/tlsf"]
 slab = ["allocator/slab"]
 buddy = ["allocator/buddy"]
+lab = ["lab_allocator"]
+# Lab byte allocator page-internal counters + expand-path logging (requires `lab`).
+heap-profile = ["lab", "lab_allocator/heap-profile"]
+lab-scan-tlsf = ["lab", "lab_allocator/lab-scan-tlsf"]
 
 [dependencies]
 log = "0.4.21"
@@ -22,3 +26,4 @@ kspin = "0.1"
 memory_addr = "0.3"
 axerrno = "0.1"
 allocator = { git = "https://github.com/arceos-org/allocator.git", tag ="v0.1.0", features = ["bitmap"] }
+lab_allocator = { path = "../../labs/lab_allocator", optional = true }

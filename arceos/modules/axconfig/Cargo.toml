@@ -12,3 +12,7 @@ documentation = "https://arceos-org.github.io/arceos/axconfig/index.html"
 [build-dependencies]
 toml_edit = "0.22"
 serde = "1.0"
+# Transitive pins: indexmap 2.14+ / hashbrown 0.17+ use edition2024, which is unsupported by
+# rust-toolchain.toml in this tree. These direct constraints unify the workspace with compatible crates.io releases.
+indexmap = "=2.7.1"
+hashbrown = "=0.15.5"

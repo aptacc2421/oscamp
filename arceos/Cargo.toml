@@ -1,3 +1,8 @@
+# Toolchain is pinned in rust-toolchain.toml. If `cargo` reports `edition2024` / unsupported manifest
+# features after refreshing the lockfile, keep `indexmap` and `hashbrown` at or below the versions
+# declared in modules/axconfig/Cargo.toml build-dependencies (or run the same `cargo update -p ... --precise`
+# commands documented there).
+
 [workspace]
 resolver = "2"
 
@@ -55,6 +60,8 @@ members = [
     "exercises/sys_map",
     "exercises/simple_hv",
     "exercises/ramfs_rename",
+
+    "labs/lab1",
 ]
 
 [workspace.package]
@@ -93,7 +100,7 @@ elf = { path = "modules/elf" }
 axfs_ramfs = { path = "./axfs_ramfs" }
 
 [patch.crates-io]
-kernel_guard = { path = "../crates/kernel_guard"} 
+kernel_guard = { path = "../crates/kernel_guard"}
 
 [profile.release]
 lto = true

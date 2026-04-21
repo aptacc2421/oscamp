@@ -12,6 +12,9 @@
 //!     - `alloc-tlsf`: Use the TLSF allocator.
 //!     - `alloc-slab`: Use the slab allocator.
 //!     - `alloc-buddy`: Use the buddy system allocator.
+//!     - `alloc-lab`: Use the course lab byte allocator (`lab_allocator`).
+//!     - `heap-profile`: Counters + `warn!` on global heap page exhaustion (implies lab allocator profiling).
+//!     - `lab-scan-tlsf`: Lab allocator TLSF-ordered scan (see `lab_allocator` crate).
 //!     - `paging`: Enable page table manipulation.
 //!     - `tls`: Enable thread-local storage.
 //! - Task management

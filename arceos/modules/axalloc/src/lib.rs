@@ -11,6 +11,12 @@
 extern crate log;
 extern crate alloc;
 
+#[cfg(feature = "heap-profile")]
+mod heap_profile;
+
+#[cfg(feature = "heap-profile")]
+pub use heap_profile::{expand_snapshot, ExpandHeapProfileSnapshot};
+
 mod page;
 
 use allocator::{AllocResult, BaseAllocator, BitmapPageAllocator, ByteAllocator, PageAllocator};
@@ -33,6 +39,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "tlsf")] {
         /// The default byte allocator.
         pub type DefaultByteAllocator = allocator::TlsfByteAllocator;
+    } else if #[cfg(feature = "lab")] {
+        /// The default byte allocator.
+        pub type DefaultByteAllocator = lab_allocator::LabByteAllocator;
     }
 }
 
@@ -70,6 +79,8 @@ impl GlobalAllocator {
                 "buddy"
             } else if #[cfg(feature = "tlsf")] {
                 "TLSF"
+            } else if #[cfg(feature = "lab")] {
+                "lab"
             }
         }
     }
@@ -114,7 +125,23 @@ impl GlobalAllocator {
                     .max(layout.size())
                     .next_power_of_two()
                     .max(PAGE_SIZE);
-                let heap_ptr = self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE)?;
+                let heap_ptr = match self.alloc_pages(expand_size / PAGE_SIZE, PAGE_SIZE) {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        #[cfg(feature = "heap-profile")]
+                        heap_profile::on_page_alloc_failed(
+                            self,
+                            &*balloc,
+                            &layout,
+                            old_size,
+                            expand_size,
+                            &e,
+                        );
+                        panic!("Bumb: {:?}.", e);
+                    }
+                };
+                #[cfg(feature = "heap-profile")]
+                heap_profile::on_expand_success(expand_size, old_size);
                 debug!(
                     "expand heap memory: [{:#x}, {:#x})",
                     heap_ptr,
