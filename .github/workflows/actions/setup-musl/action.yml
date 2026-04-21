@@ -22,10 +22,18 @@ runs:
       set -euo pipefail
       MUSL_PATH=${{ inputs.arch }}-linux-musl-cross
       # musl.cc is intermittently unreachable from GitHub-hosted runners (connect timeout).
-      # Optional: set repo Actions variable MUSL_CC_URL_OVERRIDE to a full URL of the same
-      # .tgz layout as musl.cc (…/${MUSL_PATH}.tgz).
+      # Prefer Actions variable MUSL_CC_BASE_URL: same filenames as musl.cc under one prefix, e.g.
+      #   https://github.com/<user>/<repo>/releases/download/musl-toolchains
+      # with assets: x86_64-linux-musl-cross.tgz, riscv64-linux-musl-cross.tgz, aarch64-linux-musl-cross.tgz
       if [ -n "${MUSL_CC_URL_OVERRIDE:-}" ]; then
         URLS=("${MUSL_CC_URL_OVERRIDE}")
+      elif [ -n "${MUSL_CC_BASE_URL:-}" ]; then
+        base="${MUSL_CC_BASE_URL%/}"
+        URLS=(
+          "${base}/${MUSL_PATH}.tgz"
+          "https://musl.cc/${MUSL_PATH}.tgz"
+          "http://musl.cc/${MUSL_PATH}.tgz"
+        )
       else
         URLS=(
           "https://musl.cc/${MUSL_PATH}.tgz"
@@ -44,7 +52,7 @@ runs:
         fi
       done
       if [ "$ok" -ne 1 ]; then
-        echo "::error::Could not download ${MUSL_PATH}.tgz from any configured URL. musl.cc may be down or blocked from GitHub. Add an Actions repository variable MUSL_CC_URL_OVERRIDE pointing to a mirror of the same tarball."
+        echo "::error::Could not download ${MUSL_PATH}.tgz. Set Actions variable MUSL_CC_BASE_URL to a prefix URL hosting the same musl.cc filenames, or MUSL_CC_URL_OVERRIDE for a single full .tgz URL."
         exit 1
       fi
       tar -xf "${MUSL_PATH}.tgz"

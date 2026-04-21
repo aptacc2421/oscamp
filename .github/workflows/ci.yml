@@ -8,7 +8,10 @@ jobs:
     env:
       qemu-version: 9.2.1
       rust-version: nightly-2024-09-04
-      # Optional full URL to …-linux-musl-cross.tgz when musl.cc is unreachable from GitHub.
+      # When musl.cc is unreachable: set MUSL_CC_BASE_URL (no trailing slash) to a folder that
+      # hosts the same filenames as musl.cc, e.g. …/releases/download/toolchains
+      MUSL_CC_BASE_URL: ${{ vars.MUSL_CC_BASE_URL }}
+      # Or set MUSL_CC_URL_OVERRIDE to one full .tgz URL (only useful for a single-arch workflow).
       MUSL_CC_URL_OVERRIDE: ${{ vars.MUSL_CC_URL_OVERRIDE }}
     steps:
       - uses: actions/checkout@v4
