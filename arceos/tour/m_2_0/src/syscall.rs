@@ -8,11 +8,14 @@ const SYS_EXIT: usize = 93;
 
 #[register_trap_handler(SYSCALL)]
 fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
-    println!("handle_syscall ...");
+    ax_println!("handle_syscall ...");
     let ret = match syscall_num {
-        SYS_EXIT => axtask::exit(tf.arg0() as _),
+        SYS_EXIT => {
+            ax_println!("[SYS_EXIT]: system is exiting ..");
+            axtask::exit(tf.arg0() as _)
+        },
         _ => {
-            println!("Unimplemented syscall: {}", syscall_num);
+            ax_println!("Unimplemented syscall: {}", syscall_num);
             -LinuxError::ENOSYS.code() as _
         }
     };

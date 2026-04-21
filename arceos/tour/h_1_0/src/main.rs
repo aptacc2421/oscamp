@@ -3,74 +3,58 @@
 #![feature(asm_const)]
 #![feature(riscv_ext_intrinsics)]
 
-#[macro_use]
 #[cfg(feature = "axstd")]
 extern crate axstd as std;
 extern crate alloc;
+#[macro_use]
+extern crate axlog;
 
 mod task;
 mod vcpu;
 mod regs;
 mod csrs;
+mod sbi;
+mod loader;
 
-use std::io::{self, Read};
-use std::fs::File;
-use axhal::paging::MappingFlags;
-use axhal::mem::{PAGE_SIZE_4K, phys_to_virt};
 use vcpu::VmCpuRegisters;
-use riscv::register::{htinst, htval, scause, sstatus, stval};
+use riscv::register::{scause, sstatus};
 use csrs::defs::hstatus;
 use tock_registers::LocalRegisterCopy;
-use csrs::{traps, RiscvCsrTrait, CSR};
+use csrs::{RiscvCsrTrait, CSR};
 use vcpu::_run_guest;
+use sbi::SbiMessage;
+use loader::load_vm_image;
+use axhal::mem::PhysAddr;
+
+const VM_ENTRY: usize = 0x8020_0000;
 
 #[cfg_attr(feature = "axstd", no_mangle)]
 fn main() {
-    println!("Hypervisor ...");
-    let mut buf = [0u8; 64];
-    if let Err(e) = load_user_app("/sbin/origin.bin", &mut buf) {
+    ax_println!("Hypervisor ...");
+
+    // A new address space for vm.
+    let mut uspace = axmm::new_user_aspace().unwrap();
+
+    // Load vm binary file into address space.
+    if let Err(e) = load_vm_image("/sbin/skernel", &mut uspace) {
         panic!("Cannot load app! {:?}", e);
     }
 
-    let entry = 0x8020_0000;
-    let mut uspace = axmm::new_user_aspace().unwrap();
-    uspace.map_alloc(entry.into(), PAGE_SIZE_4K, MappingFlags::READ|MappingFlags::WRITE|MappingFlags::EXECUTE|MappingFlags::USER, true).unwrap();
-
-    let (paddr, _, _) = uspace
-        .page_table()
-        .query(entry.into())
-        .unwrap_or_else(|_| panic!("Mapping failed for segment: {:#x}", entry));
-
-    println!("paddr: {:#x}", paddr);
-
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            buf.as_ptr(),
-            phys_to_virt(paddr).as_mut_ptr(),
-            PAGE_SIZE_4K,
-        );
-    }
-
-    println!("New user address space: {:#x?}", uspace);
-
-    let ept_root = uspace.page_table_root();
+    // Setup context to prepare to enter guest mode.
     let mut ctx = VmCpuRegisters::default();
-    // Set hstatus
-    let mut hstatus = LocalRegisterCopy::<usize, hstatus::Register>::new(
-        riscv::register::hstatus::read().bits(),
-    );
-    hstatus.modify(hstatus::spv::Guest);
-    // Set SPVP bit in order to accessing VS-mode memory from HS-mode.
-    hstatus.modify(hstatus::spvp::Supervisor);
-    CSR.hstatus.write_value(hstatus.get());
-    ctx.guest_regs.hstatus = hstatus.get();
+    prepare_guest_context(&mut ctx);
 
-    // Set sstatus
-    let mut sstatus = sstatus::read();
-    sstatus.set_spp(sstatus::SPP::Supervisor);
-    ctx.guest_regs.sstatus = sstatus.bits();
+    // Setup pagetable for 2nd address mapping.
+    let ept_root = uspace.page_table_root();
+    prepare_vm_pgtable(ept_root);
 
-    ctx.guest_regs.sepc = entry;
+    // Kick off vm and wait for it to exit.
+    run_guest(&mut ctx);
+
+    panic!("Hypervisor ok!");
+}
+
+fn prepare_vm_pgtable(ept_root: PhysAddr) {
     let hgatp = 8usize << 60 | usize::from(ept_root) >> 12;
     unsafe {
         core::arch::asm!(
@@ -79,23 +63,6 @@ fn main() {
         );
         core::arch::riscv64::hfence_gvma_all();
     }
-
-    for i in 0..4 {
-        run_guest(&mut ctx);
-        println!("vm exit [{}]", i);
-    }
-
-    /*
-    let user_task = task::spawn_user_task(
-        Arc::new(Mutex::new(uspace)),
-        UspaceContext::new(entry.into(), ustack_top, 2333),
-    );
-    let exit_code = user_task.join();
-
-    println!("monolithic kernel exit [{:?}] normally!", exit_code);
-    */
-
-    panic!("Hypervisor ok!");
 }
 
 fn run_guest(ctx: &mut VmCpuRegisters) {
@@ -103,13 +70,55 @@ fn run_guest(ctx: &mut VmCpuRegisters) {
         _run_guest(ctx);
     }
 
-    let scause = scause::read();
-    println!("vm exit reason: {:?}", scause.cause());
+    vmexit_handler(ctx)
 }
 
-fn load_user_app(fname: &str, buf: &mut [u8]) -> io::Result<usize> {
-    println!("app: {}", fname);
-    let mut file = File::open(fname)?;
-    let n = file.read(buf)?;
-    Ok(n)
+fn vmexit_handler(ctx: &VmCpuRegisters) {
+    use scause::{Exception, Trap};
+
+    let scause = scause::read();
+    match scause.cause() {
+        Trap::Exception(Exception::VirtualSupervisorEnvCall) => {
+            let sbi_msg = SbiMessage::from_regs(ctx.guest_regs.gprs.a_regs()).ok();
+            ax_println!("VmExit Reason: VSuperEcall: {:?}", sbi_msg);
+            if let Some(msg) = sbi_msg {
+                match msg {
+                    SbiMessage::Reset(_) => {
+                        ax_println!("Shutdown vm normally!");
+                    },
+                    _ => todo!(),
+                }
+            } else {
+                panic!("bad sbi message! ");
+            }
+        },
+        _ => {
+            panic!(
+                "Unhandled trap: {:?}, sepc: {:#x}, stval: {:#x}",
+                scause.cause(),
+                ctx.guest_regs.sepc,
+                ctx.trap_csrs.stval
+            );
+        }
+    }
+}
+
+fn prepare_guest_context(ctx: &mut VmCpuRegisters) {
+    // Set hstatus
+    let mut hstatus = LocalRegisterCopy::<usize, hstatus::Register>::new(
+        riscv::register::hstatus::read().bits(),
+    );
+    // Set Guest bit in order to return to guest mode.
+    hstatus.modify(hstatus::spv::Guest);
+    // Set SPVP bit in order to accessing VS-mode memory from HS-mode.
+    hstatus.modify(hstatus::spvp::Supervisor);
+    CSR.hstatus.write_value(hstatus.get());
+    ctx.guest_regs.hstatus = hstatus.get();
+
+    // Set sstatus in guest mode.
+    let mut sstatus = sstatus::read();
+    sstatus.set_spp(sstatus::SPP::Supervisor);
+    ctx.guest_regs.sstatus = sstatus.bits();
+    // Return to entry to start vm.
+    ctx.guest_regs.sepc = VM_ENTRY;
 }

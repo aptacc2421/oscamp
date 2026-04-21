@@ -1,54 +1,59 @@
 #![cfg_attr(feature = "axstd", no_std)]
 #![cfg_attr(feature = "axstd", no_main)]
 
-#[macro_use]
 #[cfg(feature = "axstd")]
 extern crate axstd as std;
 extern crate alloc;
 
+#[macro_use]
+extern crate axlog;
+
 mod task;
 mod syscall;
+mod loader;
 
-use std::io::{self, Read};
-use std::fs::File;
+use axstd::io;
 use axhal::paging::MappingFlags;
-use axhal::mem::{PAGE_SIZE_4K, phys_to_virt};
 use axhal::arch::UspaceContext;
+use axhal::mem::VirtAddr;
 use axsync::Mutex;
 use alloc::sync::Arc;
+use axmm::AddrSpace;
+use loader::load_user_app;
 
 const USER_STACK_SIZE: usize = 0x10000;
 const KERNEL_STACK_SIZE: usize = 0x40000; // 256 KiB
+const APP_ENTRY: usize = 0x1000;
 
 #[cfg_attr(feature = "axstd", no_mangle)]
 fn main() {
-    let mut buf = [0u8; 64];
-    if let Err(e) = load_user_app("/sbin/origin.bin", &mut buf) {
+    // A new address space for user app.
+    let mut uspace = axmm::new_user_aspace().unwrap();
+
+    // Load user app binary file into address space.
+    if let Err(e) = load_user_app("/sbin/origin", &mut uspace) {
         panic!("Cannot load app! {:?}", e);
     }
 
-    let entry = 0x1000;
-    let mut uspace = axmm::new_user_aspace().unwrap();
-    uspace.map_alloc(entry.into(), PAGE_SIZE_4K, MappingFlags::READ|MappingFlags::WRITE|MappingFlags::EXECUTE|MappingFlags::USER, true).unwrap();
+    // Init user stack.
+    let ustack_top = init_user_stack(&mut uspace, true).unwrap();
+    ax_println!("New user address space: {:#x?}", uspace);
 
-    let (paddr, _, _) = uspace
-        .page_table()
-        .query(entry.into())
-        .unwrap_or_else(|_| panic!("Mapping failed for segment: {:#x}", entry));
+    // Let's kick off the user process.
+    let user_task = task::spawn_user_task(
+        Arc::new(Mutex::new(uspace)),
+        UspaceContext::new(APP_ENTRY.into(), ustack_top),
+    );
 
-    println!("paddr: {:#x}", paddr);
+    // Wait for user process to exit ...
+    let exit_code = user_task.join();
+    ax_println!("monolithic kernel exit [{:?}] normally!", exit_code);
+}
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            buf.as_ptr(),
-            phys_to_virt(paddr).as_mut_ptr(),
-            PAGE_SIZE_4K,
-        );
-    }
-
+fn init_user_stack(uspace: &mut AddrSpace, populating: bool) -> io::Result<VirtAddr> {
     let ustack_top = uspace.end();
     let ustack_vaddr = ustack_top - crate::USER_STACK_SIZE;
-    println!(
+    ax_println!(
         "Mapping user stack: {:#x?} -> {:#x?}",
         ustack_vaddr, ustack_top
     );
@@ -56,22 +61,7 @@ fn main() {
         ustack_vaddr,
         crate::USER_STACK_SIZE,
         MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-        true,
+        populating,
     ).unwrap();
-    println!("New user address space: {:#x?}", uspace);
-
-    let user_task = task::spawn_user_task(
-        Arc::new(Mutex::new(uspace)),
-        UspaceContext::new(entry.into(), ustack_top),
-    );
-    let exit_code = user_task.join();
-
-    println!("monolithic kernel exit [{:?}] normally!", exit_code);
-}
-
-fn load_user_app(fname: &str, buf: &mut [u8]) -> io::Result<usize> {
-    println!("app: {}", fname);
-    let mut file = File::open(fname)?;
-    let n = file.read(buf)?;
-    Ok(n)
+    Ok(ustack_top)
 }

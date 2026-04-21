@@ -9,5 +9,6 @@ axmm = { workspace = true }
 axhal = { workspace = true, features = ["uspace"] }
 axsync = { workspace = true }
 axtask = { workspace = true }
+axlog = { workspace = true }
 axerrno = "0.1"
 linkme = "0.3"

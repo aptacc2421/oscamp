@@ -1,0 +1,18 @@
+[package]
+name = "simple_hv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axstd = { workspace = true, features = ["alloc", "paging", "multitask", "sched_cfs", "fs"], optional = true }
+axhal = { workspace = true }
+axmm = { workspace = true }
+axtask = { workspace = true }
+axsync = { workspace = true }
+axerrno = "0.1"
+sbi-spec = { version = "0.0.6", features = ["legacy"] }
+riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+sbi-rt = { version = "0.0.2", features = ["integer-impls", "legacy"] }
+tock-registers = "0.8.1"
+memoffset = { version = ">=0.6.5", features = ["unstable_const"] }
+axlog = { workspace = true }

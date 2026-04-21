@@ -75,8 +75,16 @@ Other systems and arch please refer to [Qemu Download](https://www.qemu.org/down
 ### 2. Build & Run
 
 ```bash
-# build app in arceos directory
+# e.g. build app in arceos directory
 make A=path/to/app ARCH=<arch> LOG=<log>
+# e.g. run app in arceos directory
+make run A=path/to/app ARCH=<arch> LOG=<log>
+# e.g. build&run oscamp tour app tour/u_1_0
+make pflash_img
+make disk_img
+make run A=tour/u_1_0
+# e.g. try to build&run oscamp tour apps
+./test_tour.sh
 ```
 
 Where `path/to/app` is the relative path to the application. Examples applications can be found in the [examples](examples/) directory or the [arceos-apps](https://github.com/arceos-org/arceos-apps) repository.

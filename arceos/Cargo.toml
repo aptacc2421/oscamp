@@ -22,6 +22,7 @@ members = [
     "modules/axsync",
     "modules/axtask",
     "modules/bump_allocator",
+    "modules/riscv_vcpu",
 
     "api/axfeat",
     "api/arceos_api",
@@ -32,6 +33,7 @@ members = [
 
     "payload/origin",
     "payload/skernel",
+    "payload/skernel2",
 
     "tour/u_1_0",
     "tour/u_2_0",
@@ -43,14 +45,21 @@ members = [
     "tour/u_7_0",
     "tour/u_8_0",
     "tour/m_1_0",
+    "tour/m_1_1",
     "tour/m_2_0",
+    "tour/m_3_0",
+    "tour/m_3_1",
     "tour/h_1_0",
+    "tour/h_2_0",
+    "tour/h_3_0",
+    "tour/h_4_0",
 
     "exercises/print_with_color",
     "exercises/support_hashmap",
     "exercises/alt_alloc",
-
-    "labs/lab1",
+    "exercises/sys_map",
+    "exercises/simple_hv",
+    "exercises/ramfs_rename",
 ]
 
 [workspace.package]
@@ -68,7 +77,7 @@ axstd = { path = "ulib/axstd" }
 axlibc = { path = "ulib/axlibc" }
 
 arceos_api = { path = "api/arceos_api" }
-arceos_posix_api = { path = "api/arceos_posix_api" }
+arceos_posix_api = { path = "api/arceos_posix_api", features = ["fs", "fd"] }
 axfeat = { path = "api/axfeat" }
 
 axalloc = { path = "modules/axalloc" }
@@ -85,6 +94,11 @@ axruntime = { path = "modules/axruntime" }
 axsync = { path = "modules/axsync" }
 axtask = { path = "modules/axtask" }
 axdma = { path = "modules/axdma" }
+elf = { path = "modules/elf" }
+axfs_ramfs = { path = "./axfs_ramfs" }
+
+[patch.crates-io]
+kernel_guard = { path = "../crates/kernel_guard"} 
 
 [patch.crates-io]
 kernel_guard = { path = "../crates/kernel_guard"} 

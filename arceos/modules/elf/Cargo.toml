@@ -1,0 +1,34 @@
+[package]
+edition = "2021"
+name = "elf"
+version = "0.7.4"
+authors = ["Christopher Cole <chris.cole.09@gmail.com>"]
+exclude = [
+    ".gitignore",
+    "/.github",
+    "/sample-objects",
+]
+description = "A pure-rust library for parsing ELF files"
+documentation = "https://docs.rs/elf/latest/elf/"
+readme = "README.md"
+keywords = [
+    "binary",
+    "elf",
+    "object",
+    "parser",
+]
+categories = [
+    "no-std",
+    "os",
+    "embedded",
+]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/cole14/rust-elf/"
+
+[lib]
+name = "elf"
+
+[dependencies]
+
+[features]
+nightly = []

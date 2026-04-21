@@ -12,6 +12,7 @@ use memory_set::{MemoryArea, MemorySet};
 use crate::backend::Backend;
 use crate::paging_err_to_ax_err;
 use crate::mapping_err_to_ax_err;
+use alloc::vec::Vec;
 
 /// The virtual memory address space.
 pub struct AddrSpace {
@@ -53,7 +54,7 @@ impl AddrSpace {
     }
 
     /// Creates a new empty address space.
-    pub(crate) fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
+    pub fn new_empty(base: VirtAddr, size: usize) -> AxResult<Self> {
         Ok(Self {
             va_range: VirtAddrRange::from_start_size(base, size),
             areas: MemorySet::new(),
@@ -272,6 +273,54 @@ impl AddrSpace {
             }
         }
         false
+    }
+
+    pub fn translated_byte_buffer(
+        &self,
+        vaddr: VirtAddr,
+        len: usize,
+    ) -> Option<Vec<&'static mut [u8]>> {
+        if !self.va_range.contains(vaddr) {
+            return None;
+        }
+        if let Some(area) = self.areas.find(vaddr) {
+            if len > area.size() {
+                warn!(
+                    "AddrSpace translated_byte_buffer len {:#x} exceeds area length {:#x}",
+                    len,
+                    area.size()
+                );
+                return None;
+            }
+
+            let mut start = vaddr;
+            let end = start + len;
+
+            debug!(
+                "start {:?} end {:?} area size {:#x}",
+                start,
+                end,
+                area.size()
+            );
+
+            let mut v = Vec::new();
+            while start < end {
+                let (start_paddr, _, page_size) = self.page_table().query(start).unwrap();
+                let mut end_va = start.align_down(page_size) + page_size.into();
+                end_va = end_va.min(end);
+
+                v.push(unsafe {
+                    core::slice::from_raw_parts_mut(
+                        phys_to_virt(start_paddr).as_mut_ptr(),
+                        (end_va - start.as_usize()).into(),
+                    )
+                });
+                start = end_va;
+            }
+            Some(v)
+        } else {
+            None
+        }
     }
 }
 
