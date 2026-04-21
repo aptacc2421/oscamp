@@ -8,6 +8,8 @@ jobs:
     env:
       qemu-version: 9.2.1
       rust-version: nightly-2024-09-04
+      # Optional full URL to …-linux-musl-cross.tgz when musl.cc is unreachable from GitHub.
+      MUSL_CC_URL_OVERRIDE: ${{ vars.MUSL_CC_URL_OVERRIDE }}
     steps:
       - uses: actions/checkout@v4
       - name: install dependencies

@@ -21,18 +21,32 @@ runs:
     run: |
       set -euo pipefail
       MUSL_PATH=${{ inputs.arch }}-linux-musl-cross
-      URL="https://musl.cc/${MUSL_PATH}.tgz"
-      # musl.cc often times out from GitHub; prefer IPv4 and several full redownload passes.
-      for attempt in 1 2 3 4 5; do
-        echo "Downloading ${URL} (attempt ${attempt}/5)..."
+      # musl.cc is intermittently unreachable from GitHub-hosted runners (connect timeout).
+      # Optional: set repo Actions variable MUSL_CC_URL_OVERRIDE to a full URL of the same
+      # .tgz layout as musl.cc (…/${MUSL_PATH}.tgz).
+      if [ -n "${MUSL_CC_URL_OVERRIDE:-}" ]; then
+        URLS=("${MUSL_CC_URL_OVERRIDE}")
+      else
+        URLS=(
+          "https://musl.cc/${MUSL_PATH}.tgz"
+          "http://musl.cc/${MUSL_PATH}.tgz"
+        )
+      fi
+      ok=0
+      for url in "${URLS[@]}"; do
+        echo "Downloading musl toolchain from: ${url}"
         rm -f "${MUSL_PATH}.tgz"
-        if curl -fSL --ipv4 --retry 12 --retry-delay 15 --connect-timeout 90 --max-time 1200 \
-            "$URL" -o "${MUSL_PATH}.tgz"; then
+        # Short timeouts: fail fast per URL; avoid multi-minute curl --retry storms.
+        if curl -fSL --ipv4 --connect-timeout 30 --max-time 600 --retry 2 --retry-delay 5 \
+            "$url" -o "${MUSL_PATH}.tgz"; then
+          ok=1
           break
         fi
-        sleep 45
       done
-      test -f "${MUSL_PATH}.tgz"
+      if [ "$ok" -ne 1 ]; then
+        echo "::error::Could not download ${MUSL_PATH}.tgz from any configured URL. musl.cc may be down or blocked from GitHub. Add an Actions repository variable MUSL_CC_URL_OVERRIDE pointing to a mirror of the same tarball."
+        exit 1
+      fi
       tar -xf "${MUSL_PATH}.tgz"
   - name: Download musl toolchain
     if: ${{ steps.cache-musl.outputs.cache-hit != 'true' && inputs.arch == 'loongarch64' }}
@@ -40,7 +54,7 @@ runs:
     run: |
       set -euo pipefail
       URL="https://github.com/LoongsonLab/oscomp-toolchains-for-oskernel/releases/download/loongarch64-linux-musl-cross-gcc-13.2.0/loongarch64-linux-musl-cross.tgz"
-      curl -fSL --ipv4 --retry 5 --retry-delay 10 --connect-timeout 60 --max-time 900 \
+      curl -fSL --ipv4 --connect-timeout 30 --max-time 600 --retry 2 --retry-delay 5 \
         "$URL" -o loongarch64-linux-musl-cross.tgz
       tar -xf loongarch64-linux-musl-cross.tgz
   - uses: actions/cache/save@v4
