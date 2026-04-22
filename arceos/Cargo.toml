@@ -1,7 +1,8 @@
 # Toolchain is pinned in rust-toolchain.toml. If `cargo` reports `edition2024` / unsupported manifest
 # features after refreshing the lockfile, keep `indexmap` and `hashbrown` at or below the versions
 # declared in modules/axconfig/Cargo.toml build-dependencies (or run the same `cargo update -p ... --precise`
-# commands documented there).
+# commands documented there). The transitive `home` crate must stay at 0.5.11 or older (0.5.12+ uses
+# edition2024); if the resolver upgrades it: `cargo update -p home --precise 0.5.11`.
 
 [workspace]
 resolver = "2"
